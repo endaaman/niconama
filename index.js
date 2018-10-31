@@ -170,20 +170,19 @@ async function onComment(comment) {
       return
     }
   }
-
   // TODO: process kotehan
   // const matched = comment.text.match(/@(\S+)/i)
   // if (matched) {
   //   matched[1]
   // }
-
   say(getReadableMessage(comment.text, settings))
 }
 
-// main()
-onComment({
-  attr: {
-    user_id: 'hoge',
-  },
-  text: 'add hoge ホゲ'
-})
+// onComment({
+//   attr: {
+//     user_id: 'hoge',
+//   },
+//   text: 'add hoge ホゲ'
+// })
+
+main()
