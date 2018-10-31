@@ -4,6 +4,7 @@ const util = require('util')
 const exec = require('child_process').exec
 const NicoliveAPI = require('nicolive-api').default
 const shellQuote = require('shell-quote')
+const notifier = require('node-notifier')
 
 const VOICE_FILE = './voices/mei_normal.htsvoice'
 const SETTINGS_FILE = './settings.json'
@@ -158,6 +159,10 @@ async function onComment(comment) {
     id = id.substr(0, 6)
   }
   console.log(`[COMMENT] ${id} - ${comment.text}`)
+  notifier.notify({
+    title: id,
+    message: comment.text
+  })
 
   // load settings
   const settings = await loadSettings().catch(E)
