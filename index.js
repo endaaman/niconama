@@ -13,66 +13,6 @@ const w = util.promisify.bind(util)
 let current = new Promise((r) => { r() })
 const commentSet = new Set()
 
-class Context {
-  constructor(client, manager) {
-    this.client = client
-    this.manager = manager
-  }
-}
-
-const commands = [
-  {
-    cmd: ['add', 'teach', '調教'],
-    func: async (argv, settings) => {
-      if (argv.length !== 3) {
-        say('書式がおかしいよ')
-        return
-      }
-      const reg = argv[1].toLowerCase()
-      for (replacer of settings.replacers) {
-        if (replacer.reg === reg) {
-          say(`もう知ってる ${replacer.text}だよね`)
-          return
-        }
-      }
-      const n = {
-        users: settings.users,
-        replacers: settings.replacers.concat([
-          {
-            reg: argv[1],
-            text: argv[2],
-          }
-        ])
-      }
-      await saveSettings(n).catch(E)
-      say(`${argv[1]}の読み方は${argv[2]}と教えてもらいました`)
-    }
-  }, {
-    cmd: ['remove', 'forget', '忘却'],
-    func: async (argv, settings) => {
-      if (argv.length !== 2) {
-        say('書式がおかしいよ')
-        return
-      }
-      const reg = argv[1].toLowerCase()
-      for (const i in settings.replacers) {
-        const replacer = settings.replacers[i]
-        if (replacer.reg === reg) {
-          const r = settings.replacers.slice()
-          r.splice(i, 1)
-          const n = {
-            users: settings.users,
-            replacers: r,
-          }
-          await saveSettings(n).catch(E)
-          say(`${replacer.text}の読み方を忘れました`)
-          return
-        }
-      }
-      say(`${argv[1]}の読み方を知らないよ`)
-    }
-  }
-]
 
 function say(message) {
   const handler = () => {
@@ -82,6 +22,9 @@ function say(message) {
 }
 
 async function sayInner(message) {
+  if (!message) {
+    return
+  }
   const fn = '/tmp/voice.wav'
   const cmd =
     `echo '${message}' | open_jtalk -m ${VOICE_FILE} -x ./naist-jdic -ow ${fn} && play -q ${fn}`
@@ -92,6 +35,151 @@ function E(err) {
   console.error('[ERROR]', err)
   say('エラーが起きたよ')
   process.exit(1)
+}
+
+const commands = [
+  {
+    cmd: ['add', 'teach', '調教'],
+    func: 'teachFunc',
+  }, {
+    cmd: ['remove', 'forget', '忘却'],
+    func: 'forgetFunc',
+  }
+]
+
+class Context {
+  constructor(client, manager) {
+    this.client = client
+    this.manager = manager
+    this.__settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'))
+  }
+
+  getSettings() {
+    return JSON.parse(JSON.stringify(this.__settings))
+  }
+
+  async loadSettings() {
+    const text = await w(fs.readFile)(SETTINGS_FILE, 'utf-8').catch(E)
+    this.__settings = JSON.parse(text)
+  }
+
+  async updateSettings(settings) {
+    this.__settings = await w(fs.writeFile)(SETTINGS_FILE, JSON.stringify(settings, null, 2)).catch(E)
+  }
+
+  async teachFunc(argv) {
+    if (argv.length !== 3) {
+      say('書式がおかしいよ')
+      return
+    }
+    const s = this.getSettings()
+    const reg = argv[1].toLowerCase()
+    for (const replacer of s.replacers) {
+      if (replacer.reg === reg) {
+        say(`もう知ってる ${replacer.text}だよね`)
+        return
+      }
+    }
+    s.replacers.push({
+      reg: argv[1],
+      text: argv[2],
+    })
+    await this.updateSettings(s).catch(E)
+    say(`${argv[1]}の読み方は${argv[2]}と教えてもらいました`)
+  }
+
+  async forgetFunc(argv) {
+    if (argv.length !== 2) {
+      say('書式がおかしいよ')
+      return
+    }
+    const s = this.getSettings()
+    const reg = argv[1].toLowerCase()
+    for (const i in s.replacers) {
+      const replacer = s.replacers[i]
+      if (replacer.reg === reg) {
+        s.replacers.splice(i, 1)
+        await this.updateSettings(s).catch(E)
+        say(`${replacer.text}の読み方を忘れました`)
+        return
+      }
+    }
+    say(`${argv[1]}の読み方を知らないよ`)
+  }
+
+  async registerUserName(id, name) {
+    const user = { id, name }
+    const s = this.getSettings()
+    s.users.push({ id, name })
+    await this.updateSettings(s).catch(E)
+    say(`${name}さんの名前を登録しました`)
+  }
+
+  async getUserName(id) {
+    const users = this.getSettings().users.slice()
+    users.reverse()
+    for (const user of users) {
+      if (user.id === id) {
+        return user.name
+      }
+    }
+    if (!/^\d+$/.test(id)) { // if 184
+      return id.substr(0, 10)
+    }
+    const status = await this.client.getUserInfo(id).catch((e) => {
+      console.warn(`[WARN] not found user id: ${id}`)
+      return {
+        nickname: id
+      }
+    })
+    const name = status.nickname
+    return name
+  }
+
+  convertToReadableMessage(rawMessage) {
+    const reversedReplacers = this.getSettings().replacers.slice().reverse()
+    let message = rawMessage
+    for (const replacer of reversedReplacers) {
+      const reg = new RegExp(replacer.reg, 'ig')
+      message = message.replace(reg, replacer.text)
+    }
+    return message
+  }
+
+  async onComment(comment) {
+    let rawUserId = comment.attr.user_id
+    const rawMessage = comment.text
+    const commentId = `${rawUserId}_${rawMessage}`
+    if (commentSet.has(commentId)) {
+      // skip duplicated
+      return
+    }
+    commentSet.add(commentId)
+
+    await this.loadSettings().catch(E)
+    const userName = await this.getUserName(rawUserId).catch(E)
+    notifier.notify({
+      title: `${userName}`,
+      message: rawMessage
+    })
+    console.log(`[COMMENT] ${userName} - ${rawMessage}`)
+
+    // process if comment is command
+    const splitted = shellQuote.parse(rawMessage)
+    for (const command of commands) {
+      if (command.cmd.includes(splitted[0])) {
+        await this[command.func](splitted).catch(E)
+        return
+      }
+    }
+    // TODO: process kotehan
+    const matched = rawMessage.match(/(@|＠)(\S+)/i)
+    if (matched) {
+      await this.registerUserName(rawUserId, matched[2])
+      return
+    }
+    say(this.convertToReadableMessage(rawMessage))
+  }
 }
 
 async function main() {
@@ -109,7 +197,7 @@ async function main() {
   const context = new Context(client, manager)
 
   console.log(`[${lv}]`)
-  manager.viewer.connection.on('comment', onComment.bind(context))
+  manager.viewer.connection.on('comment', context.onComment.bind(context))
   manager.viewer.connection.on('ejected', () => {
     console.log('追い出されました')
     manager.disconnect()
@@ -128,98 +216,12 @@ async function main() {
       return
     }
   })
-  await onComment.bind(context)({
+  await context.onComment({
     attr: {
       user_id: '1276437',
     },
     text: '読み上げ開始'
   })
-}
-
-async function loadSettings() {
-  const text = await w(fs.readFile)(SETTINGS_FILE, 'utf-8').catch(E)
-  return JSON.parse(text)
-}
-
-async function saveSettings(settings) {
-  await w(fs.writeFile)(SETTINGS_FILE, JSON.stringify(settings, null, 2)).catch(E)
-}
-
-function convertToReadableMessage(rawMessage, settings) {
-  const reversedReplacers = settings.replacers.slice().reverse()
-  let message = rawMessage
-  for (const replacer of reversedReplacers) {
-    const reg = new RegExp(replacer.reg, 'ig')
-    message = message.replace(reg, replacer.text)
-  }
-  return message
-}
-
-async function getUserName(context, settings, id) {
-  for (const user of settings.users) {
-    if (user.id === id) {
-      return user.name
-    }
-  }
-  if (!/^\d+$/.test(id)) { // if 184
-    return id.substr(0, 6)
-  }
-  if (id === '900000000') {
-    return '放送主'
-  }
-  const status = await context.client.getUserInfo(id).catch((e) => {
-    console.warn(`[WARN] not found user id: ${id}`)
-    return {
-      nickname: id
-    }
-  })
-  const name = status.nickname
-  ///* caching automatically */
-  // const user = { id, name }
-  // const n = {
-  //   users: settings.users.concat([ user ]),
-  //   replacers: settings.replacers.slice()
-  // }
-  // await saveSettings(n).catch(E)
-  return name
-}
-
-async function onComment(comment) {
-  const context = this
-
-  let rawUserId = comment.attr.user_id
-  const rawMessage = comment.text
-  const commentId = `${rawUserId}_${rawMessage}`
-  if (commentSet.has(commentId)) {
-    // skip duplicated
-    return
-  }
-  commentSet.add(commentId)
-
-  // load settings
-  const settings = await loadSettings().catch(E)
-
-  const userName = await getUserName(context, settings, rawUserId).catch(E)
-  notifier.notify({
-    title: `${userName}`,
-    message: rawMessage
-  })
-  console.log(`[COMMENT] ${userName} - ${rawMessage}`)
-
-  // process if comment is command
-  const splitted = shellQuote.parse(rawMessage)
-  for (const command of commands) {
-    if (command.cmd.includes(splitted[0])) {
-      await command.func(splitted, settings).catch(E)
-      return
-    }
-  }
-  // TODO: process kotehan
-  // const matched = rawMessage.match(/@(\S+)/i)
-  // if (matched) {
-  //   matched[1]
-  // }
-  say(convertToReadableMessage(rawMessage, settings))
 }
 
 main()
