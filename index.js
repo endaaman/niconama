@@ -11,70 +11,14 @@ const SETTINGS_FILE = './settings.json'
 
 const w = util.promisify.bind(util)
 let current = new Promise((r) => { r() })
+const commentSet = new Set()
 
-
-function say(message) {
-  const handler = () => {
-    return sayInner(message).catch(E)
+class Context {
+  constructor(client, manager) {
+    this.client = client
+    this.manager = manager
   }
-  current = current.then(handler, handler)
 }
-
-async function sayInner(message) {
-  const fn = '/tmp/voice.wav'
-  const cmd =
-    `echo '${message}' | open_jtalk -m ${VOICE_FILE} -x ./naist-jdic -ow ${fn} && play -q ${fn}`
-  await w(exec)(cmd).catch(E)
-}
-
-function E(err) {
-  console.error('[ERROR]', err)
-  say('エラーが起きたよ')
-  process.exit(1)
-}
-
-async function getClient() {
-  // const client = await NicoliveAPI.login({
-  //   email:process.env.EMAIL,
-  //   password: process.env.PASSWORD
-  // })
-  // console.log('Logged in')
-  return  new NicoliveAPI(process.env.SESSION)
-}
-
-async function main() {
-  const { argv } = process
-  if (argv.length < 3) {
-    console.error('Streaming ID is needed.')
-    return
-  }
-  const lv = argv[2]
-
-  const client = await getClient().catch(E)
-
-  const con = await client.connectLive(lv).catch(E)
-  console.log(`[${lv}]`)
-  con.viewer.connection.on('comment', onComment)
-  con.viewer.connection.on('ejected', () => {
-    console.log('追い出されました')
-    con.disconnect()
-  })
-
-  readline.emitKeypressEvents(process.stdin)
-  process.stdin.setRawMode(true)
-  process.stdin.on('keypress', (str, key) => {
-    if (key.ctrl && key.name === 'c') {
-      process.exit()
-      return
-    }
-    if (!key.ctrl && key.name === 'q') {
-      console.log('Quiting..')
-      process.exit()
-      return
-    }
-  })
-}
-
 
 const commands = [
   {
@@ -92,7 +36,7 @@ const commands = [
         }
       }
       const n = {
-        ids: settings.ids,
+        users: settings.users,
         replacers: settings.replacers.concat([
           {
             reg: argv[1],
@@ -117,7 +61,7 @@ const commands = [
           const r = settings.replacers.slice()
           r.splice(i, 1)
           const n = {
-            ids: settings.ids,
+            users: settings.users,
             replacers: r,
           }
           await saveSettings(n).catch(E)
@@ -130,6 +74,68 @@ const commands = [
   }
 ]
 
+function say(message) {
+  const handler = () => {
+    return sayInner(message).catch(E)
+  }
+  current = current.then(handler, handler)
+}
+
+async function sayInner(message) {
+  const fn = '/tmp/voice.wav'
+  const cmd =
+    `echo '${message}' | open_jtalk -m ${VOICE_FILE} -x ./naist-jdic -ow ${fn} && play -q ${fn}`
+  await w(exec)(cmd).catch(E)
+}
+
+function E(err) {
+  console.error('[ERROR]', err)
+  say('エラーが起きたよ')
+  process.exit(1)
+}
+
+async function main() {
+  const { argv } = process
+  if (argv.length < 3) {
+    console.error('Streaming ID is needed.')
+    return
+  }
+  const lv = argv[2]
+
+  const sessionText = (await w(fs.readFile)('.session', 'utf-8').catch(E))
+  const session = sessionText.split('\n').join('')
+  const client = new NicoliveAPI(session)
+  const manager = await client.connectLive(lv).catch(E)
+  const context = new Context(client, manager)
+
+  console.log(`[${lv}]`)
+  manager.viewer.connection.on('comment', onComment.bind(context))
+  manager.viewer.connection.on('ejected', () => {
+    console.log('追い出されました')
+    manager.disconnect()
+  })
+
+  readline.emitKeypressEvents(process.stdin)
+  process.stdin.setRawMode(true)
+  process.stdin.on('keypress', (str, key) => {
+    if (key.ctrl && key.name === 'c') {
+      process.exit()
+      return
+    }
+    if (!key.ctrl && key.name === 'q') {
+      console.log('Quiting..')
+      process.exit()
+      return
+    }
+  })
+  await onComment.bind(context)({
+    attr: {
+      user_id: '1276437',
+    },
+    text: '読み上げ開始'
+  })
+}
+
 async function loadSettings() {
   const text = await w(fs.readFile)(SETTINGS_FILE, 'utf-8').catch(E)
   return JSON.parse(text)
@@ -139,7 +145,7 @@ async function saveSettings(settings) {
   await w(fs.writeFile)(SETTINGS_FILE, JSON.stringify(settings, null, 2)).catch(E)
 }
 
-function getReadableMessage(rawMessage, settings) {
+function convertToReadableMessage(rawMessage, settings) {
   const reversedReplacers = settings.replacers.slice().reverse()
   let message = rawMessage
   for (const replacer of reversedReplacers) {
@@ -149,26 +155,59 @@ function getReadableMessage(rawMessage, settings) {
   return message
 }
 
-async function postprocessMessage(message) {
+async function getUserName(context, settings, id) {
+  for (const user of settings.users) {
+    if (user.id === id) {
+      return user.name
+    }
+  }
+  if (!/^\d+$/.test(id)) { // if 184
+    return id.substr(0, 6)
+  }
+  if (id === '900000000') {
+    return '放送主'
+  }
+  const status = await context.client.getUserInfo(id).catch((e) => {
+    console.warn(`[WARN] not found user id: ${id}`)
+    return {
+      nickname: id
+    }
+  })
+  const name = status.nickname
+  ///* caching automatically */
+  // const user = { id, name }
+  // const n = {
+  //   users: settings.users.concat([ user ]),
+  //   replacers: settings.replacers.slice()
+  // }
+  // await saveSettings(n).catch(E)
+  return name
 }
 
 async function onComment(comment) {
-  // log
-  let id = comment.attr.user_id
-  if (/\d+/.test(id)) {
-    id = id.substr(0, 6)
+  const context = this
+
+  let rawUserId = comment.attr.user_id
+  const rawMessage = comment.text
+  const commentId = `${rawUserId}_${rawMessage}`
+  if (commentSet.has(commentId)) {
+    // skip duplicated
+    return
   }
-  console.log(`[COMMENT] ${id} - ${comment.text}`)
-  notifier.notify({
-    title: id,
-    message: comment.text
-  })
+  commentSet.add(commentId)
 
   // load settings
   const settings = await loadSettings().catch(E)
 
+  const userName = await getUserName(context, settings, rawUserId).catch(E)
+  notifier.notify({
+    title: `${userName}`,
+    message: rawMessage
+  })
+  console.log(`[COMMENT] ${userName} - ${rawMessage}`)
+
   // process if comment is command
-  const splitted = shellQuote.parse(comment.text)
+  const splitted = shellQuote.parse(rawMessage)
   for (const command of commands) {
     if (command.cmd.includes(splitted[0])) {
       await command.func(splitted, settings).catch(E)
@@ -176,18 +215,11 @@ async function onComment(comment) {
     }
   }
   // TODO: process kotehan
-  // const matched = comment.text.match(/@(\S+)/i)
+  // const matched = rawMessage.match(/@(\S+)/i)
   // if (matched) {
   //   matched[1]
   // }
-  say(getReadableMessage(comment.text, settings))
+  say(convertToReadableMessage(rawMessage, settings))
 }
-
-// onComment({
-//   attr: {
-//     user_id: 'hoge',
-//   },
-//   text: 'add hoge ホゲ'
-// })
 
 main()
