@@ -188,7 +188,12 @@ async function main() {
     console.error('Streaming ID is needed.')
     return
   }
-  const lv = argv[2]
+  const matched = argv[2].match(/[0-9]{9}/)
+  if (!matched) {
+    console.error('Invalid steam ID')
+    return
+  }
+  const lv = `lv${matched[0]}`
 
   const sessionText = (await w(fs.readFile)('.session', 'utf-8').catch(E))
   const session = sessionText.split('\n').join('')
