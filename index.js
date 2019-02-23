@@ -28,7 +28,7 @@ async function sayInner(message) {
   const fn = '/tmp/voice.wav'
   const cmd =
     `echo '${message}' | open_jtalk -m ${VOICE_FILE} -x ./naist-jdic -ow ${fn} && play -q ${fn}`
-  await w(exec)(cmd).catch(E)
+  await w(exec)(cmd).catch((e) => console.log(e))
 }
 
 function E(err) {
@@ -147,6 +147,9 @@ class Context {
   }
 
   async onComment(comment) {
+    // if (comment.room && comment.room.label.index !== 0) {
+    //   return
+    // }
     let rawUserId = comment.attr.user_id
     const rawMessage = comment.text
     const commentId = `${rawUserId}_${rawMessage}`
